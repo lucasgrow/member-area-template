@@ -19,24 +19,19 @@ import { cn } from "@heroui/react";
 import Sidebar, { type SidebarItem } from "@/components/layout/sidebar";
 import { useTheme } from "@/hooks/use-theme";
 
-const sidebarItems: SidebarItem[] = [
-  { key: "dashboard", href: "/dashboard", icon: "solar:home-2-linear", title: "Dashboard" },
-  { key: "settings", href: "/settings", icon: "solar:settings-linear", title: "Settings" },
-];
-
-const mobileNavItems = [
-  { key: "dashboard", href: "/dashboard", icon: "solar:home-2-bold", title: "Dashboard" },
-  { key: "settings", href: "/settings", icon: "solar:settings-bold", title: "Settings" },
-];
-
 interface LayoutUser {
   name: string;
   email: string;
   image: string | null;
+  role: "user" | "admin";
+  membership: "free" | "start" | "pro" | "ultra";
 }
 
 const breadcrumbLabels: Record<string, string> = {
   dashboard: "Dashboard",
+  courses: "Courses",
+  admin: "Admin",
+  onboarding: "First access",
   settings: "Settings",
 };
 
@@ -50,14 +45,32 @@ function generateBreadcrumbs(pathname: string) {
 
 export function AuthenticatedLayoutClient({
   user,
+  appName,
   children,
 }: {
   user: LayoutUser;
+  appName: string;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
   const [isCompact, setIsCompact] = useState(false);
   const { theme, toggleTheme } = useTheme();
+  const sidebarItems: SidebarItem[] = [
+    { key: "dashboard", href: "/dashboard", icon: "solar:home-2-linear", title: "Dashboard" },
+    { key: "courses", href: "/courses", icon: "solar:notebook-linear", title: "Courses" },
+    ...(user.role === "admin"
+      ? [{ key: "admin", href: "/admin", icon: "solar:shield-user-linear", title: "Admin" }]
+      : []),
+    { key: "settings", href: "/settings", icon: "solar:settings-linear", title: "Settings" },
+  ];
+  const mobileNavItems = sidebarItems
+    .filter((item) => item.href && item.icon)
+    .map((item) => ({
+      key: item.key,
+      title: item.title,
+      href: item.href!,
+      icon: item.icon!.replace("-linear", "-bold"),
+    }));
 
   const breadcrumbs = generateBreadcrumbs(pathname);
   const currentCrumb = breadcrumbs[breadcrumbs.length - 1] ?? null;
@@ -74,7 +87,7 @@ export function AuthenticatedLayoutClient({
       >
         {/* Logo */}
         <div className={cn("flex h-16 items-center border-b border-divider px-4", isCompact && "justify-center")}>
-          {!isCompact && <span className="text-lg font-bold">Builder</span>}
+          {!isCompact && <span className="truncate text-lg font-bold">{appName}</span>}
           <Button
             isIconOnly
             variant="light"
@@ -105,7 +118,7 @@ export function AuthenticatedLayoutClient({
                 {!isCompact && (
                   <div className="flex-1 text-left">
                     <p className="text-small font-medium truncate">{user.name}</p>
-                    <p className="text-tiny text-default-400 truncate">{user.email}</p>
+                    <p className="text-tiny text-default-400 truncate">{user.membership} | {user.email}</p>
                   </div>
                 )}
                 {!isCompact && <Icon icon="solar:alt-arrow-up-linear" width={16} className="text-default-400" />}

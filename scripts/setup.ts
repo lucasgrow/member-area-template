@@ -1,28 +1,12 @@
 import * as p from "@clack/prompts";
-import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
 import crypto from "node:crypto";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
 const root = resolve(__dirname, "..");
-
-function run(cmd: string, opts?: { cwd?: string }): string {
-  return execSync(cmd, {
-    encoding: "utf-8",
-    cwd: opts?.cwd ?? root,
-    stdio: ["pipe", "pipe", "pipe"],
-  }).trim();
-}
-
-function runSafe(cmd: string): string | null {
-  try {
-    return run(cmd);
-  } catch {
-    return null;
-  }
-}
-
-// ── Palettes ────────────────────────────────────────────────────
+const wranglerPath = resolve(root, "wrangler.toml");
 
 type Palette = {
   label: string;
@@ -32,7 +16,7 @@ type Palette = {
 
 const palettes: Record<string, Palette> = {
   zinc: {
-    label: "Black & White (zinc)",
+    label: "Black and white (zinc)",
     light: {
       50: "#FAFAFA", 100: "#F4F4F5", 200: "#E4E4E7", 300: "#D4D4D8",
       400: "#A1A1AA", 500: "#71717A", 600: "#52525B", 700: "#3F3F46",
@@ -98,213 +82,256 @@ const palettes: Record<string, Palette> = {
   },
 };
 
-function generateTailwindPrimary(paletteKey: string): string {
-  const pal = palettes[paletteKey];
-  const indent = "              ";
-  const lines = (obj: Record<string, string>) =>
-    Object.entries(obj)
-      .map(([k, v]) => `${indent}${k}: "${v}",`)
-      .join("\n");
+function run(command: string): string {
+  return execSync(command, {
+    encoding: "utf-8",
+    cwd: root,
+    stdio: ["pipe", "pipe", "pipe"],
+  }).trim();
+}
 
-  return `// Primary colors for "${paletteKey}" palette
-            primary: {
-${lines(pal.light)}
-            },`;
+function runSafe(command: string): string | null {
+  try {
+    return run(command);
+  } catch {
+    return null;
+  }
+}
+
+function ensureNotCancelled<T>(value: T | symbol): asserts value is T {
+  if (p.isCancel(value)) {
+    p.cancel("Setup cancelled before provisioning.");
+    process.exit(0);
+  }
+}
+
+function envLine(name: string, value: string) {
+  return `${name}=${JSON.stringify(value)}`;
 }
 
 function patchTailwindConfig(paletteKey: string) {
   const file = resolve(root, "tailwind.config.ts");
   let content = readFileSync(file, "utf-8");
-
-  // Update PALETTE const
-  content = content.replace(
-    /const PALETTE = "[^"]+"/,
-    `const PALETTE = "${paletteKey}"`
-  );
-
+  content = content.replace(/const PALETTE = "[^"]+"/, `const PALETTE = "${paletteKey}"`);
   if (paletteKey === "zinc") {
     writeFileSync(file, content);
     return;
   }
 
-  const pal = palettes[paletteKey];
-
-  // Replace light primary block
-  const lightPrimaryRegex =
-    /(themes:\s*\{\s*light:\s*\{\s*colors:\s*\{[\s\S]*?)primary:\s*\{[^}]+\}/;
-  const lightPrimary = Object.entries(pal.light)
-    .map(([k, v]) => `              ${k}: "${v}",`)
+  const palette = palettes[paletteKey];
+  const lightRegex = /(themes:\s*\{\s*light:\s*\{\s*colors:\s*\{[\s\S]*?)primary:\s*\{[^}]+\}/;
+  const light = Object.entries(palette.light)
+    .map(([key, value]) => `              ${key}: "${value}",`)
     .join("\n");
-  content = content.replace(
-    lightPrimaryRegex,
-    `$1primary: {\n${lightPrimary}\n            }`
-  );
+  content = content.replace(lightRegex, `$1primary: {\n${light}\n            }`);
 
-  // Replace dark primary block
-  const darkSection = content.indexOf("dark: {");
-  if (darkSection !== -1) {
-    const after = content.slice(darkSection);
-    const darkPrimaryRegex = /(colors:\s*\{[\s\S]*?)primary:\s*\{[^}]+\}/;
-    const darkPrimary = Object.entries(pal.dark)
-      .map(([k, v]) => `              ${k}: "${v}",`)
+  const darkStart = content.indexOf("dark: {");
+  if (darkStart !== -1) {
+    const prefix = content.slice(0, darkStart);
+    const dark = content.slice(darkStart);
+    const darkRegex = /(colors:\s*\{[\s\S]*?)primary:\s*\{[^}]+\}/;
+    const colors = Object.entries(palette.dark)
+      .map(([key, value]) => `              ${key}: "${value}",`)
       .join("\n");
-    const patched = after.replace(
-      darkPrimaryRegex,
-      `$1primary: {\n${darkPrimary}\n            }`
-    );
-    content = content.slice(0, darkSection) + patched;
+    content = prefix + dark.replace(darkRegex, `$1primary: {\n${colors}\n            }`);
   }
-
   writeFileSync(file, content);
 }
 
-// ── Main ────────────────────────────────────────────────────────
-
-async function main() {
-  p.intro("cloudflare-builder setup");
-
-  // 1. Check wrangler
-  const whoami = runSafe("npx wrangler whoami");
-  if (!whoami || whoami.includes("Not logged in")) {
-    p.log.warning("Not logged into Wrangler. Running `wrangler login`...");
-    execSync("npx wrangler login", { stdio: "inherit", cwd: root });
-  } else {
-    p.log.success(`Wrangler: ${whoami.split("\n").pop()}`);
+function runPreflight() {
+  const failures: string[] = [];
+  if (!existsSync(wranglerPath)) failures.push("wrangler.toml is missing");
+  if (!existsSync(resolve(root, "drizzle", "0000_initial_member_area.sql"))) {
+    failures.push("initial D1 migration is missing");
   }
-
-  // 2. Project name
-  const projectName = (await p.text({
-    message: "Project name (used for D1, R2, worker):",
-    placeholder: "my-saas",
-    validate: (v) =>
-      /^[a-z0-9-]+$/.test(v) ? undefined : "Lowercase letters, numbers, hyphens only",
-  })) as string;
-
-  if (p.isCancel(projectName)) process.exit(0);
-
-  // 3. Create D1
-  p.log.step(`Creating D1 database: ${projectName}-d1`);
-  const d1Output = run(`npx wrangler d1 create ${projectName}-d1`);
-  const dbIdMatch = d1Output.match(/database_id\s*=\s*"([^"]+)"/);
-  if (!dbIdMatch) {
-    p.log.error("Could not extract database_id from wrangler output:");
-    p.log.message(d1Output);
-    process.exit(1);
-  }
-  const databaseId = dbIdMatch[1];
-  p.log.success(`D1 created: ${databaseId}`);
-
-  // 4. Create R2
-  p.log.step(`Creating R2 bucket: ${projectName}-storage`);
-  try {
-    run(`npx wrangler r2 bucket create ${projectName}-storage`);
-    p.log.success("R2 bucket created");
-  } catch (e: any) {
-    if (e.message?.includes("already exists")) {
-      p.log.warning("R2 bucket already exists, continuing...");
-    } else {
-      throw e;
+  if (existsSync(wranglerPath)) {
+    const wrangler = readFileSync(wranglerPath, "utf-8");
+    if (
+      !wrangler.includes('name = "member-area-template"') ||
+      !wrangler.includes('database_id = "00000000-0000-0000-0000-000000000000"') ||
+      !wrangler.includes('bucket_name = "member-area-template-storage"')
+    ) {
+      failures.push("wrangler.toml is already configured or has invalid template sentinels");
     }
   }
 
-  // 5. Palette
-  const palette = (await p.select({
-    message: "Color palette:",
-    options: Object.entries(palettes).map(([key, pal]) => ({
-      value: key,
-      label: pal.label,
-    })),
-  })) as string;
-
-  if (p.isCancel(palette)) process.exit(0);
-
-  // 6. Google OAuth
-  p.log.message(
-    "Set up Google OAuth: https://console.cloud.google.com/apis/credentials"
-  );
-  p.log.message(
-    `Redirect URI: http://localhost:3000/api/auth/callback/google`
-  );
-  const googleId = (await p.text({
-    message: "Google OAuth Client ID:",
-    placeholder: "xxxx.apps.googleusercontent.com",
-  })) as string;
-  if (p.isCancel(googleId)) process.exit(0);
-
-  const googleSecret = (await p.text({
-    message: "Google OAuth Client Secret:",
-  })) as string;
-  if (p.isCancel(googleSecret)) process.exit(0);
-
-  // 7. Resend
-  p.log.message("Get a Resend API key: https://resend.com/api-keys");
-  p.log.message(
-    "Note: Free tier only sends to your account email. Add a domain for other recipients."
-  );
-  const resendKey = (await p.text({
-    message: "Resend API key:",
-    placeholder: "re_xxxx",
-  })) as string;
-  if (p.isCancel(resendKey)) process.exit(0);
-
-  const emailFrom = (await p.text({
-    message: "Email sender address:",
-    placeholder: "noreply@yourdomain.com",
-  })) as string;
-  if (p.isCancel(emailFrom)) process.exit(0);
-
-  // 8. Auth secret
-  const authSecret = crypto.randomUUID();
-
-  // 9. Write .dev.vars
-  const devVars = [
-    `AUTH_SECRET=${authSecret}`,
-    `AUTH_GOOGLE_ID=${googleId}`,
-    `AUTH_GOOGLE_SECRET=${googleSecret}`,
-    `AUTH_RESEND_KEY=${resendKey}`,
-    `AUTH_EMAIL_FROM=${emailFrom}`,
-    `R2_ACCESS_KEY_ID=`,
-    `R2_SECRET_ACCESS_KEY=`,
-    `R2_ACCOUNT_ID=`,
-    `R2_BUCKET_NAME=${projectName}-storage`,
-  ].join("\n");
-
-  writeFileSync(resolve(root, ".dev.vars"), devVars + "\n");
-  p.log.success(".dev.vars created");
-
-  // 10. Update wrangler.toml
-  const tomlPath = resolve(root, "wrangler.toml");
-  let toml = readFileSync(tomlPath, "utf-8");
-  toml = toml.replace(/\{\{PROJECT_NAME\}\}/g, projectName);
-  toml = toml.replace(/\{\{D1_DATABASE_ID\}\}/g, databaseId);
-  writeFileSync(tomlPath, toml);
-  p.log.success(
-    `wrangler.toml updated → worker: ${projectName}, D1: ${projectName}-d1 (${databaseId}), R2: ${projectName}-storage`
-  );
-
-  // 11. Patch tailwind palette
-  patchTailwindConfig(palette);
-  p.log.success(`Tailwind palette set to "${palette}"`);
-
-  // 12. Run initial migration
-  const migrationFile = resolve(root, "drizzle", "0001_initial.sql");
-  if (existsSync(migrationFile)) {
-    p.log.step("Running initial migration...");
-    run(
-      `npx wrangler d1 execute ${projectName}-d1 --local --file=drizzle/0001_initial.sql`
-    );
-    p.log.success("Migration applied");
-  } else {
-    p.log.warning("drizzle/0001_initial.sql not found — generate with: bun run db:generate");
+  if (failures.length > 0) {
+    for (const failure of failures) p.log.error(failure);
+    process.exit(1);
   }
-
-  // Done
-  p.outro(
-    `Setup complete! Run:\n  bun dev\n\nR2 uploads are optional — leave R2_ACCESS_KEY_ID blank to skip.\nSee CLAUDE.md § Onboarding Guide for R2 setup.\n\nTo deploy:\n  bun run deploy`
-  );
+  p.log.success("Template preflight passed. No resources were created.");
 }
 
-main().catch((err) => {
-  p.log.error(err.message);
+async function main() {
+  p.intro("member-area-template setup");
+  if (process.argv.includes("--check")) {
+    runPreflight();
+    return;
+  }
+
+  runPreflight();
+  const whoami = runSafe("npx wrangler whoami");
+  if (!whoami || whoami.includes("Not logged in")) {
+    p.log.error("Wrangler is not authenticated. Run `npx wrangler login`, then run setup again.");
+    process.exit(1);
+  }
+  p.log.success(`Wrangler: ${whoami.split("\n").pop()}`);
+
+  const projectName = await p.text({
+    message: "Project slug (Worker, D1, and R2 prefix):",
+    placeholder: "my-member-area",
+    validate: (value) => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)
+      ? undefined
+      : "Use lowercase letters, numbers, and single hyphens",
+  });
+  ensureNotCancelled(projectName);
+
+  const appName = await p.text({
+    message: "Public app name:",
+    placeholder: "My Academy",
+    validate: (value) => value.trim().length > 0 ? undefined : "App name is required",
+  });
+  ensureNotCancelled(appName);
+
+  const appDomain = await p.text({
+    message: "Production domain:",
+    placeholder: "members.example.com",
+    validate: (value) => /^[a-z0-9.-]+$/i.test(value) && value.includes(".")
+      ? undefined
+      : "Enter a hostname without protocol or path",
+  });
+  ensureNotCancelled(appDomain);
+
+  const adminEmail = await p.text({
+    message: "Initial admin email:",
+    placeholder: "owner@example.com",
+    validate: (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+      ? undefined
+      : "Enter a valid email address",
+  });
+  ensureNotCancelled(adminEmail);
+
+  const palette = await p.select({
+    message: "Color palette:",
+    options: Object.entries(palettes).map(([value, item]) => ({ value, label: item.label })),
+  });
+  ensureNotCancelled(palette);
+
+  const googleId = await p.text({ message: "Google OAuth Client ID:" });
+  ensureNotCancelled(googleId);
+  const googleSecret = await p.password({ message: "Google OAuth Client Secret:" });
+  ensureNotCancelled(googleSecret);
+  const resendKey = await p.password({ message: "Resend API key:" });
+  ensureNotCancelled(resendKey);
+  const emailFrom = await p.text({
+    message: "Magic-link sender:",
+    placeholder: `login@${appDomain}`,
+  });
+  ensureNotCancelled(emailFrom);
+
+  const billingEnabled = await p.confirm({
+    message: "Enable the generic billing webhook?",
+    initialValue: true,
+  });
+  ensureNotCancelled(billingEnabled);
+
+  const r2AccountId = await p.text({
+    message: "R2 Account ID (optional; required for presigned uploads):",
+    defaultValue: "",
+  });
+  ensureNotCancelled(r2AccountId);
+  const r2AccessKey = await p.text({
+    message: "R2 Access Key ID (optional):",
+    defaultValue: "",
+  });
+  ensureNotCancelled(r2AccessKey);
+  const r2Secret = await p.password({
+    message: "R2 Secret Access Key (optional):",
+  });
+  ensureNotCancelled(r2Secret);
+
+  const confirmed = await p.confirm({
+    message: `Create isolated Cloudflare resources for ${projectName}?`,
+    initialValue: false,
+  });
+  ensureNotCancelled(confirmed);
+  if (!confirmed) {
+    p.cancel("Setup cancelled. No resources were created.");
+    return;
+  }
+
+  p.log.step(`Creating D1 database ${projectName}-d1`);
+  const d1Output = run(`npx wrangler d1 create ${projectName}-d1`);
+  const databaseId = d1Output.match(/database_id\s*=\s*"([^"]+)"/)?.[1];
+  if (!databaseId) {
+    p.log.error(`D1 was created but its database ID could not be parsed.\n${d1Output}`);
+    process.exit(1);
+  }
+
+  p.log.step(`Creating R2 bucket ${projectName}-storage`);
+  run(`npx wrangler r2 bucket create ${projectName}-storage`);
+
+  const corsPath = resolve(tmpdir(), `${projectName}-r2-cors.json`);
+  writeFileSync(corsPath, JSON.stringify({
+    rules: [{
+      allowed: {
+        origins: ["http://localhost:3000", `https://${appDomain}`],
+        methods: ["PUT"],
+        headers: ["Content-Type"],
+      },
+      exposeHeaders: ["ETag"],
+      maxAgeSeconds: 3600,
+    }],
+  }, null, 2));
+  try {
+    run(`npx wrangler r2 bucket cors set ${projectName}-storage --file ${corsPath} --force`);
+  } finally {
+    unlinkSync(corsPath);
+  }
+
+  const authSecret = crypto.randomBytes(32).toString("base64url");
+  const billingSecret = billingEnabled
+    ? crypto.randomBytes(32).toString("base64url")
+    : "";
+  const devVars = [
+    envLine("APP_NAME", String(appName)),
+    envLine("APP_DOMAIN", String(appDomain)),
+    envLine("ADMIN_EMAIL", String(adminEmail).toLowerCase()),
+    envLine("AUTH_SECRET", authSecret),
+    envLine("AUTH_GOOGLE_ID", String(googleId)),
+    envLine("AUTH_GOOGLE_SECRET", String(googleSecret)),
+    envLine("AUTH_RESEND_KEY", String(resendKey)),
+    envLine("AUTH_EMAIL_FROM", String(emailFrom)),
+    envLine("BILLING_WEBHOOK_SECRET", billingSecret),
+    envLine("R2_ACCOUNT_ID", String(r2AccountId)),
+    envLine("R2_ACCESS_KEY_ID", String(r2AccessKey)),
+    envLine("R2_SECRET_ACCESS_KEY", String(r2Secret)),
+    envLine("R2_BUCKET_NAME", `${projectName}-storage`),
+  ].join("\n");
+  writeFileSync(resolve(root, ".dev.vars"), `${devVars}\n`);
+
+  let wrangler = readFileSync(wranglerPath, "utf-8");
+  wrangler = wrangler.replaceAll("member-area-template-storage", `${projectName}-storage`);
+  wrangler = wrangler.replaceAll("member-area-template-d1", `${projectName}-d1`);
+  wrangler = wrangler.replaceAll('"member-area-template"', `"${projectName}"`);
+  wrangler = wrangler.replace("00000000-0000-0000-0000-000000000000", databaseId);
+  writeFileSync(wranglerPath, wrangler);
+  patchTailwindConfig(String(palette));
+
+  p.log.step("Applying D1 migrations to the local development database");
+  run(`npx wrangler d1 migrations apply ${projectName}-d1 --local`);
+
+  p.outro([
+    "Setup complete.",
+    "Run locally: bun dev",
+    "Apply production migrations: npx wrangler d1 migrations apply " + projectName + "-d1 --remote",
+    "Configure production secrets: see docs/ENVIRONMENT.md",
+    "Deploy after review: bun run deploy",
+  ].join("\n"));
+}
+
+main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  p.log.error(message);
   process.exit(1);
 });

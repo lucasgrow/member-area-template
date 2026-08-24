@@ -5,8 +5,8 @@ import { ThemeScript } from "@/lib/theme/theme-script";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Cloudflare Builder",
-  description: "SaaS starter on Cloudflare",
+  title: "Member Area",
+  description: "Courses, lessons, progress, and membership access",
 };
 
 export default function RootLayout({

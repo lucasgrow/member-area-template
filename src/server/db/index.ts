@@ -6,20 +6,16 @@ export * from "./schema";
 
 type DbInstance = DrizzleD1Database<typeof schema>;
 
-const GLOBAL_DB_KEY = Symbol.for("cloudflare-builder.db");
+const GLOBAL_DB_KEY = Symbol.for("member-area-template.db");
 
 type GlobalWithDb = typeof globalThis & {
   [GLOBAL_DB_KEY]?: DbInstance;
 };
 
 function createDevDb() {
-  // eslint-disable-next-line
   const { drizzle: drizzleSqlite } = require("drizzle-orm/better-sqlite3");
-  // eslint-disable-next-line
   const Database = require("better-sqlite3");
-  // eslint-disable-next-line
   const { resolve, join } = require("node:path");
-  // eslint-disable-next-line
   const { readdirSync } = require("node:fs");
 
   const d1Dir = resolve(".wrangler", "state", "v3", "d1", "miniflare-D1DatabaseObject");

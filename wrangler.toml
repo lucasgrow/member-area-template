@@ -1,6 +1,6 @@
-name = "{{PROJECT_NAME}}"
+name = "member-area-template"
 main = ".open-next/worker.js"
-compatibility_date = "2024-12-30"
+compatibility_date = "2026-08-17"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 workers_dev = true
 
@@ -10,17 +10,17 @@ binding = "ASSETS"
 
 [[services]]
 binding = "WORKER_SELF_REFERENCE"
-service = "{{PROJECT_NAME}}"
+service = "member-area-template"
 
 [placement]
 mode = "smart"
 
 [[d1_databases]]
 binding = "DATABASE"
-database_name = "{{PROJECT_NAME}}-d1"
-database_id = "{{D1_DATABASE_ID}}"
+database_name = "member-area-template-d1"
+database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "./drizzle"
 
 [[r2_buckets]]
 binding = "STORAGE"
-bucket_name = "{{PROJECT_NAME}}-storage"
+bucket_name = "member-area-template-storage"

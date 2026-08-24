@@ -3,8 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 function getLocalD1DB() {
+  const basePath = path.resolve(".wrangler");
+  if (!fs.existsSync(basePath)) return ":memory:";
+
   try {
-    const basePath = path.resolve(".wrangler");
     const dbFile = fs
       .readdirSync(basePath, { encoding: "utf-8", recursive: true })
       .find((f) => f.endsWith(".sqlite"));
@@ -15,7 +17,7 @@ function getLocalD1DB() {
 
     return path.resolve(basePath, dbFile);
   } catch (err) {
-    console.log(`Error  ${err}`);
+    throw new Error(`Could not resolve local D1 database: ${String(err)}`);
   }
 }
 

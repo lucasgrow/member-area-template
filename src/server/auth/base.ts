@@ -17,11 +17,12 @@ function getEnv(): CloudflareEnv {
       AUTH_GOOGLE_SECRET: process.env.AUTH_GOOGLE_SECRET ?? "",
       AUTH_RESEND_KEY: process.env.AUTH_RESEND_KEY ?? "",
       AUTH_EMAIL_FROM: process.env.AUTH_EMAIL_FROM ?? "",
+      ADMIN_EMAIL: process.env.ADMIN_EMAIL,
     } as CloudflareEnv;
   }
 }
 
-function createD1Adapter(db: any): Adapter {
+function createD1Adapter(db: any, adminEmail?: string): Adapter {
   return {
     async createUser(data: any) {
       const id = crypto.randomUUID();
@@ -31,6 +32,11 @@ function createD1Adapter(db: any): Adapter {
         email: data.email,
         emailVerified: data.emailVerified ?? null,
         image: data.image ?? null,
+        role: adminEmail && data.email.toLowerCase() === adminEmail.toLowerCase()
+          ? "admin"
+          : "user",
+        membership: "free",
+        onboarded: false,
         createdAt: new Date(),
       });
       const user = await db.select().from(users).where(eq(users.id, id)).then((r: any[]) => r[0]);
@@ -107,7 +113,7 @@ export function createAuth(db: any) {
   return NextAuth({
     trustHost: true,
     secret: env.AUTH_SECRET,
-    adapter: createD1Adapter(db),
+    adapter: createD1Adapter(db, env.ADMIN_EMAIL),
     session: {
       strategy: "jwt",
     },
@@ -158,6 +164,8 @@ export function createAuth(db: any) {
 
           if (dbUser) {
             session.user.role = dbUser.role || "user";
+            session.user.membership = dbUser.membership || "free";
+            session.user.onboarded = Boolean(dbUser.onboarded);
           }
         }
         return session;
